@@ -3,7 +3,6 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   View,
   Text,
-  Alert,
   ScrollView,
   TouchableOpacity,
   Image,
@@ -26,6 +25,7 @@ import { auth } from "../firebaseConfig";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "../firebaseConfig";
 import * as FileSystem from "expo-file-system/legacy";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export default function GuardaRoupa() {
   const navigation = useNavigation();
@@ -52,11 +52,20 @@ export default function GuardaRoupa() {
   const [cidade, setCidade] = useState("");
   const [iaLoading, setIaLoading] = useState(false);
   const [sugestoes, setSugestoes] = useState([]);
-  const [showConfirmModal, setShowConfirmModal] = useState(false);
-  const [pecaToDelete, setPecaToDelete] = useState(null);
-  const [modoVisualizacao, setModoVisualizacao] = useState("unico"); // "unico" ou "completo"
+  const [modoVisualizacao, setModoVisualizacao] = useState("unico");
   const [sugestaoEnviada, setSugestaoEnviada] = useState(false);
   const [lookAtualIndex, setLookAtualIndex] = useState(0);
+  const [modalMensagem, setModalMensagem] = useState({ visible: false, title: "", mensagem: "" });
+  const [modalConfirmExclusao, setModalConfirmExclusao] = useState(false);
+  const [pecaToDelete, setPecaToDelete] = useState(null);
+
+  // const REMOVE_BG_API_KEY = "7kCPyfEBEbcr9MjHib3qzQoX";
+  // const OPENWEATHER_API_KEY = "0dde739998e257474718498f3369f13c";
+  // const KEY_GEMINI = "AIzaSyDdVHjvTeKmaEW63FjNbE9x71ccrKjfDyo";
+  const LIMITE_DIARIO_ESTIMADO = 30;
+  let chamadasHoje = 0;
+  const genAI = new GoogleGenerativeAI(KEY_GEMINI);
+  const geminiModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
   // Carregar peças
   useEffect(() => {
@@ -78,7 +87,7 @@ export default function GuardaRoupa() {
         })
         .catch((err) => {
           console.error("Erro ao carregar peças:", err);
-          Alert.alert("Erro", "Não foi possível carregar seu guarda-roupa.");
+          setModalMensagem({ visible: true, title: "Erro", mensagem: "Não foi possível carregar seu guarda-roupa." });
         });
     }
   }, []);
@@ -87,14 +96,10 @@ export default function GuardaRoupa() {
   useEffect(() => {
     (async () => {
       if (Platform.OS !== "web") {
-        const { status } =
-          await ImagePicker.requestMediaLibraryPermissionsAsync();
+        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
         const cameraStatus = await ImagePicker.requestCameraPermissionsAsync();
         if (status !== "granted" || cameraStatus.status !== "granted") {
-          Alert.alert(
-            "Permissões necessárias",
-            "Precisamos de acesso à câmera e galeria."
-          );
+          setModalMensagem({ visible: true, title: "Permissões necessárias", mensagem: "Precisamos de acesso à câmera e galeria." });
         }
       }
     })();
@@ -118,14 +123,14 @@ export default function GuardaRoupa() {
   // --------- FUNÇÕES (IMAGEM, PEÇA, IA, ETC.) - INICIO ---------
   const removeBackground = async (localUri) => {
     if (!localUri || typeof localUri !== "string") {
-      Alert.alert("Erro", "Imagem inválida.");
+      setModalMensagem({ visible: true, title: "Erro", mensagem: "Imagem inválida." });
       return null;
     }
     setRemovingBg(true);
     try {
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists) {
-        Alert.alert("Erro", "Arquivo não encontrado.");
+        setModalMensagem({ visible: true, title: "Erro", mensagem: "Arquivo não encontrado." });
         return null;
       }
       const base64 = await FileSystem.readAsStringAsync(localUri, {
@@ -145,7 +150,7 @@ export default function GuardaRoupa() {
       if (!response.ok) {
         const errorText = await response.text();
         console.error("Erro Remove.bg:", errorText);
-        Alert.alert("Erro", "Falha ao remover fundo.");
+        setModalMensagem({ visible: true, title: "Erro", mensagem: "Falha ao remover fundo." });
         return localUri;
       }
       const arrayBuffer = await response.arrayBuffer();
@@ -153,16 +158,14 @@ export default function GuardaRoupa() {
       const bytes = new Uint8Array(arrayBuffer);
       bytes.forEach((b) => (binary += String.fromCharCode(b)));
       const base64Image = btoa(binary);
-      const outputPath = `${
-        FileSystem.cacheDirectory
-      }sem_fundo_${Date.now()}.png`;
+      const outputPath = `${FileSystem.cacheDirectory}sem_fundo_${Date.now()}.png`;
       await FileSystem.writeAsStringAsync(outputPath, base64Image, {
         encoding: FileSystem.EncodingType.Base64,
       });
       return outputPath;
     } catch (error) {
       console.error("Erro removeBackground:", error);
-      Alert.alert("Erro", "Falha ao processar imagem.");
+      setModalMensagem({ visible: true, title: "Erro", mensagem: "Falha ao processar imagem." });
       return localUri;
     } finally {
       setRemovingBg(false);
@@ -184,7 +187,7 @@ export default function GuardaRoupa() {
       }
     } catch (error) {
       console.error("Erro ao abrir seletor:", error);
-      Alert.alert("Erro", "Falha ao acessar câmera/galeria.");
+      setModalMensagem({ visible: true, title: "Erro", mensagem: "Falha ao acessar câmera/galeria." });
       return;
     }
     if (result.canceled || !result.assets?.[0]) return;
@@ -197,7 +200,7 @@ export default function GuardaRoupa() {
         uri = cacheFileUri;
       } catch (copyError) {
         console.error("Erro ao copiar imagem:", copyError);
-        Alert.alert("Erro", "Não foi possível carregar a imagem.");
+        setModalMensagem({ visible: true, title: "Erro", mensagem: "Não foi possível carregar a imagem." });
         return;
       }
     }
@@ -212,19 +215,16 @@ export default function GuardaRoupa() {
 
   const salvarPecaLocal = async () => {
     if (!auth.currentUser?.uid) {
-      Alert.alert("Erro", "Você não está logado.");
+      setModalMensagem({ visible: true, title: "Erro", mensagem: "Você não está logado." });
       return;
     }
     const uid = auth.currentUser.uid;
     if (!imagemUri) {
-      Alert.alert("Erro", "Selecione uma imagem.");
+      setModalMensagem({ visible: true, title: "Erro", mensagem: "Selecione uma imagem." });
       return;
     }
     if (!tipoEspecifico.trim() || !cor.trim() || !estilo.trim()) {
-      Alert.alert(
-        "Erro",
-        "Preencha os campos obrigatórios: tipo, cor e estilo."
-      );
+      setModalMensagem({ visible: true, title: "Erro", mensagem: "Preencha os campos obrigatórios: tipo, cor e estilo." });
       return;
     }
     setLoading(true);
@@ -236,8 +236,7 @@ export default function GuardaRoupa() {
         estilo: estilo.trim(),
         tecido: tecido.trim() || null,
         estampa: estampa,
-        descricaoEstampa:
-          estampa === "sim" ? descricaoEstampa.trim() || null : null,
+        descricaoEstampa: estampa === "sim" ? descricaoEstampa.trim() || null : null,
         textura: textura.trim() || null,
         imageUrl: imagemUri,
       };
@@ -247,10 +246,10 @@ export default function GuardaRoupa() {
         [tipo]: [...prev[tipo], { ...peca, id: pecaId, uri: imagemUri }],
       }));
       fecharModalAdicionarPeca();
-      Alert.alert("Sucesso", "Peça adicionada!");
+      setModalMensagem({ visible: true, title: "Sucesso", mensagem: "Peça adicionada!" });
     } catch (error) {
       console.error("Erro ao salvar peça:", error);
-      Alert.alert("Erro", "Não foi possível salvar a peça.");
+      setModalMensagem({ visible: true, title: "Erro", mensagem: "Não foi possível salvar a peça." });
     } finally {
       setLoading(false);
     }
@@ -258,25 +257,20 @@ export default function GuardaRoupa() {
 
   const handleExcluirPeca = (pecaId, categoria) => {
     setPecaToDelete({ id: pecaId, categoria });
-    setShowConfirmModal(true);
+    setModalConfirmExclusao(true);
   };
 
   const buscarTemperatura = async (cidade) => {
     try {
       const response = await fetch(
-        `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(
-          cidade
-        )}&appid=${OPENWEATHER_API_KEY}&units=metric`
+        `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(cidade)}&appid=${OPENWEATHER_API_KEY}&units=metric`
       );
-      if (response.status === 401) {
-        console.warn("Chave da OpenWeatherMap inválida.");
-        return 22;
-      }
       if (response.status === 404) {
-        Alert.alert(
-          "Cidade não encontrada",
-          `Não encontramos a cidade "${cidade}".\nPor favor, digite o nome completo de uma cidade válida (ex: "São Paulo", "Rio de Janeiro").`
-        );
+        setModalMensagem({
+          visible: true,
+          title: "Cidade não encontrada",
+          mensagem: `Não encontramos a cidade "${cidade}".\nPor favor, digite o nome completo de uma cidade válida (ex: "São Paulo", "Rio de Janeiro").`,
+        });
         throw new Error("Cidade inválida");
       }
       if (!response.ok) {
@@ -288,7 +282,7 @@ export default function GuardaRoupa() {
     } catch (error) {
       console.error("Erro na API de clima:", error);
       if (error.message !== "Cidade inválida") {
-        Alert.alert("Erro", "Não foi possível obter a temperatura.");
+        setModalMensagem({ visible: true, title: "Erro", mensagem: "Não foi possível obter a temperatura." });
       }
       return 22;
     }
@@ -298,45 +292,90 @@ export default function GuardaRoupa() {
     setShowSugestaoModal(true);
   };
 
-  // ✅ Nova função com Gemini
   const handleGerarSugestao = async () => {
     if (!ocasiao.trim() || !cidade.trim()) {
-      Alert.alert("Atenção", "Preencha ocasião e cidade.");
+      setModalMensagem({ visible: true, title: "Atenção", mensagem: "Preencha ocasião e cidade." });
+      return;
+    }
+    const restantes = LIMITE_DIARIO_ESTIMADO - chamadasHoje;
+    console.log(`UsageId do dia: ${chamadasHoje}/${LIMITE_DIARIO_ESTIMADO} (restam: ${restantes})`);
+    if (chamadasHoje >= LIMITE_DIARIO_ESTIMADO) {
+      setModalMensagem({ visible: true, title: "Limite diário atingido", mensagem: "Você atingiu o limite estimado de uso da IA hoje." });
       return;
     }
     setIaLoading(true);
     setSugestoes([]);
     try {
-      // 🔧 Fallback imediato para desenvolvimento (IA desativada por cota)
-      console.log(
-        "⚠️ IA desativada temporariamente (cota excedida). Usando fallback."
-      );
-      // (Opcional) Simular busca de temperatura para UX mais realista
       let temperatura = 22;
       try {
         temperatura = await buscarTemperatura(cidade.trim());
       } catch (e) {
-        // Ignorar erro de cidade — fallback mantém 22°C
+        // fallback
       }
       const todasPecas = [
-        ...pecas.superior,
-        ...pecas.inferior,
-        ...pecas.unica,
-        ...pecas.sapato,
+        ...pecas.superior.map(p => ({ ...p, categoria: "superior" })),
+        ...pecas.inferior.map(p => ({ ...p, categoria: "inferior" })),
+        ...pecas.unica.map(p => ({ ...p, categoria: "unica" })),
+        ...pecas.sapato.map(p => ({ ...p, categoria: "sapato" })),
       ];
       if (todasPecas.length === 0) {
-        Alert.alert("Atenção", "Seu guarda-roupa está vazio!");
+        setModalMensagem({ visible: true, title: "Atenção", mensagem: "Seu guarda-roupa está vazio!" });
         setIaLoading(false);
         return;
       }
-      // ✅ Usa apenas o fallback automático
-      const fallback = gerarLooksFallback(todasPecas).slice(0, 2);
-      setSugestoes(fallback);
+      const prompt = `
+Você é um stylist profissional. Crie 2 looks para "${ocasiao}" em ${cidade} (${temperatura}°C).
+Regras:
+- Use SOMENTE as peças listadas abaixo.
+- Combinações válidas: (superior + inferior + sapato) ou (unica + sapato).
+- Retorne APENAS um JSON válido com o formato abaixo.
+Formato:
+{
+  "looks": [
+    { "pecas": [0, 2, 5], "explicacao": "..." },
+    { "pecas": [3, 6], "explicacao": "..." }
+  ]
+}
+Peças (índice + categoria + tipo + cor):
+${todasPecas.map((p, i) => `${i}. ${p.categoria} | ${p.tipo || "?"} | cor ${p.cor || "?"}`).join("\n")}
+`;
+      const result = await geminiModel.generateContent(prompt);
+      let raw = result.response.text().trim();
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      const jsonStr = jsonMatch ? jsonMatch[0] : raw;
+      if (!jsonStr.startsWith("{")) {
+        throw new Error("Resposta inválida da IA");
+      }
+      const data = JSON.parse(jsonStr);
+      const looks = [];
+      if (data.looks?.length) {
+        for (const look of data.looks.slice(0, 2)) {
+          if (Array.isArray(look.pecas)) {
+            const validPecas = look.pecas
+              .map(idx => {
+                const i = parseInt(String(idx).trim(), 10);
+                return i >= 0 && i < todasPecas.length ? { ...todasPecas[i] } : null;
+              })
+              .filter(Boolean);
+            const cats = validPecas.map(p => p.categoria);
+            const isValid =
+              (cats.includes("unica") && cats.filter(c => c === "sapato").length === 1 && validPecas.length === 2) ||
+              (cats.includes("superior") && cats.includes("inferior") && cats.filter(c => c === "sapato").length === 1 && validPecas.length === 3);
+            if (isValid) {
+              looks.push({ pecas: validPecas, explicacao: look.explicacao || "Sugerido pela IA." });
+            }
+          }
+        }
+      }
+      if (looks.length === 0) throw new Error("Nenhum look válido");
+      chamadasHoje += 1;
+      console.log(`✅ Chamada #${chamadasHoje} usada. Restam: ${LIMITE_DIARIO_ESTIMADO - chamadasHoje}`);
+      setSugestoes(looks);
       setLookAtualIndex(0);
-      setSugestaoEnviada(true); // ✅ Ativa a tela de looks
+      setSugestaoEnviada(true);
     } catch (error) {
-      console.error("Erro no fallback (inesperado):", error);
-      Alert.alert("Erro", "Falha ao gerar sugestão.");
+      console.error("Erro na IA:", error.message || error);
+      setModalMensagem({ visible: true, title: "Erro na IA", mensagem: "Falha ao gerar looks. Tente novamente." });
     } finally {
       setIaLoading(false);
     }
@@ -348,22 +387,14 @@ export default function GuardaRoupa() {
     const unicas = todasPecas.filter((p) => p.categoria === "unica");
     const sapatos = todasPecas.filter((p) => p.categoria === "sapato");
     const looks = [];
-    for (
-      let i = 0;
-      i < 2 && superiores[i] && inferiores[i] && sapatos[i];
-      i++
-    ) {
+    for (let i = 0; i < 2 && superiores[i] && inferiores[i] && sapatos[i]; i++) {
       looks.push({
         pecas: [superiores[i], inferiores[i], sapatos[i]],
         explicacao: "Combinação prática sugerida automaticamente.",
       });
     }
     if (looks.length < 2) {
-      for (
-        let i = 0;
-        i < 2 && looks.length < 2 && unicas[i] && sapatos[i];
-        i++
-      ) {
+      for (let i = 0; i < 2 && looks.length < 2 && unicas[i] && sapatos[i]; i++) {
         looks.push({
           pecas: [unicas[i], sapatos[i]],
           explicacao: "Look com peça única sugerido automaticamente.",
@@ -376,7 +407,7 @@ export default function GuardaRoupa() {
   const handleSalvarLook = async (look) => {
     const uid = auth.currentUser?.uid;
     if (!uid) {
-      Alert.alert("Erro", "Você não está logado.");
+      setModalMensagem({ visible: true, title: "Erro", mensagem: "Você não está logado." });
       return;
     }
     try {
@@ -395,13 +426,12 @@ export default function GuardaRoupa() {
         createdAt: new Date(),
       };
       await salvarLook(uid, lookData);
-      Alert.alert("Sucesso", "Look salvo com sucesso!");
+      setModalMensagem({ visible: true, title: "Sucesso", mensagem: "Look salvo com sucesso!" });
     } catch (error) {
       console.error("Erro ao salvar look:", error);
-      Alert.alert("Erro", "Não foi possível salvar o look.");
+      setModalMensagem({ visible: true, title: "Erro", mensagem: "Não foi possível salvar o look." });
     }
   };
-
   // --------- FUNÇÕES - FIM ---------
 
   return (
@@ -454,9 +484,7 @@ export default function GuardaRoupa() {
             {pecas.superior.length > 0 ? (
               <View style={styles.andarContainer}>
                 <FlatList
-                  data={Array(10)
-                    .fill()
-                    .flatMap(() => pecas.superior)}
+                  data={Array(10).fill().flatMap(() => pecas.superior)}
                   renderItem={({ item }) => (
                     <TouchableOpacity
                       style={styles.pecaItemGrande}
@@ -472,9 +500,7 @@ export default function GuardaRoupa() {
                   horizontal
                   showsHorizontalScrollIndicator={false}
                   contentContainerStyle={{ paddingLeft: 20 }}
-                  initialScrollIndex={Math.floor(
-                    (pecas.superior.length * 10) / 2
-                  )}
+                  initialScrollIndex={Math.floor((pecas.superior.length * 10) / 2)}
                   getItemLayout={(data, index) => ({
                     length: 240 + 32,
                     offset: (240 + 32) * index,
@@ -495,9 +521,7 @@ export default function GuardaRoupa() {
             {pecas.inferior.length > 0 ? (
               <View style={styles.andarContainer}>
                 <FlatList
-                  data={Array(10)
-                    .fill()
-                    .flatMap(() => pecas.inferior)}
+                  data={Array(10).fill().flatMap(() => pecas.inferior)}
                   renderItem={({ item }) => (
                     <TouchableOpacity
                       style={styles.pecaItemGrande}
@@ -513,9 +537,7 @@ export default function GuardaRoupa() {
                   horizontal
                   showsHorizontalScrollIndicator={false}
                   contentContainerStyle={{ paddingLeft: 0 }}
-                  initialScrollIndex={Math.floor(
-                    (pecas.inferior.length * 10) / 2
-                  )}
+                  initialScrollIndex={Math.floor((pecas.inferior.length * 10) / 2)}
                   getItemLayout={(data, index) => ({
                     length: 240 + 32,
                     offset: (240 + 32) * index,
@@ -539,9 +561,7 @@ export default function GuardaRoupa() {
             {pecas.unica.length > 0 ? (
               <View style={styles.andarContainer}>
                 <FlatList
-                  data={Array(10)
-                    .fill()
-                    .flatMap(() => pecas.unica)}
+                  data={Array(10).fill().flatMap(() => pecas.unica)}
                   renderItem={({ item }) => (
                     <TouchableOpacity
                       style={styles.pecaItemUnicaGrande}
@@ -582,14 +602,11 @@ export default function GuardaRoupa() {
             )}
           </>
         )}
-
         {/* Sapatos (sempre visível) */}
         {pecas.sapato.length > 0 ? (
           <View style={styles.andarContainer}>
             <FlatList
-              data={Array(10)
-                .fill()
-                .flatMap(() => pecas.sapato)}
+              data={Array(10).fill().flatMap(() => pecas.sapato)}
               renderItem={({ item }) => (
                 <TouchableOpacity
                   style={styles.pecaItemPequeno}
@@ -819,7 +836,6 @@ export default function GuardaRoupa() {
       )}
 
       {/* Modal: Sugerir Look */}
-      {/* Modal: Sugerir Look */}
       <Modal
         visible={showSugestaoModal}
         animationType="fade"
@@ -840,9 +856,7 @@ export default function GuardaRoupa() {
             >
               <Text style={styles.closeButtonText}>×</Text>
             </TouchableOpacity>
-
             {!sugestaoEnviada ? (
-              // Primeira tela: formulário
               <>
                 <Text style={styles.sugestaoModalTitle}>Montar outfit</Text>
                 <View style={styles.inputGroup}>
@@ -881,18 +895,13 @@ export default function GuardaRoupa() {
                 </TouchableOpacity>
               </>
             ) : (
-              // Segunda tela: looks com navegação por setas (SEM comentários inválidos!)
               <>
-                {/* Cabeçalho com clima */}
                 <View style={styles.climaHeader}>
                   <Text style={styles.climaTexto}>
                     {`Clima em ${cidade}: ${ocasiao}`}
                   </Text>
                 </View>
-
-                {/* Container com setas e look central */}
                 <View style={styles.lookNavigatorContainer}>
-                  {/* Seta Esquerda */}
                   {sugestoes.length > 1 && lookAtualIndex > 0 ? (
                     <TouchableOpacity
                       style={styles.seta}
@@ -905,8 +914,6 @@ export default function GuardaRoupa() {
                       <Text style={styles.setaTexto}>{"\u25C0"}</Text>
                     </View>
                   )}
-
-                  {/* Look atual */}
                   <View style={styles.lookCard}>
                     <View style={styles.lookPecasContainer}>
                       {sugestoes[lookAtualIndex]?.pecas.map((peca, i) => {
@@ -932,9 +939,7 @@ export default function GuardaRoupa() {
                     </View>
                     <TouchableOpacity
                       style={styles.botaoSalvarLook}
-                      onPress={() =>
-                        handleSalvarLook(sugestoes[lookAtualIndex])
-                      }
+                      onPress={() => handleSalvarLook(sugestoes[lookAtualIndex])}
                     >
                       <Image
                         source={require("../assets/salvar.png")}
@@ -942,10 +947,7 @@ export default function GuardaRoupa() {
                       />
                     </TouchableOpacity>
                   </View>
-
-                  {/* Seta Direita */}
-                  {sugestoes.length > 1 &&
-                  lookAtualIndex < sugestoes.length - 1 ? (
+                  {sugestoes.length > 1 && lookAtualIndex < sugestoes.length - 1 ? (
                     <TouchableOpacity
                       style={styles.seta}
                       onPress={() => setLookAtualIndex(lookAtualIndex + 1)}
@@ -958,8 +960,6 @@ export default function GuardaRoupa() {
                     </View>
                   )}
                 </View>
-
-                {/* Indicador de página */}
                 {sugestoes.length > 1 && (
                   <View style={styles.indicadorContainer}>
                     {sugestoes.map((_, i) => (
@@ -968,8 +968,7 @@ export default function GuardaRoupa() {
                         style={[
                           styles.indicador,
                           {
-                            backgroundColor:
-                              i === lookAtualIndex ? "#000" : "#ccc",
+                            backgroundColor: i === lookAtualIndex ? "#000" : "#ccc",
                           },
                         ]}
                       />
@@ -982,50 +981,90 @@ export default function GuardaRoupa() {
         </View>
       </Modal>
 
-      {/* Modal: Confirmação de Exclusão */}
+      {/* Modal: Confirmação de Exclusão (novo) */}
       <Modal
-        visible={showConfirmModal}
+        visible={modalConfirmExclusao}
         animationType="fade"
         transparent={true}
-        onRequestClose={() => setShowConfirmModal(false)}
+        onRequestClose={() => {
+          setModalConfirmExclusao(false);
+          setPecaToDelete(null);
+        }}
       >
         <View style={styles.overlayCentral}>
           <View style={styles.confirmModalBox}>
             <Text style={styles.confirmModalTitle}>
               Tem certeza que deseja apagar esse item?
             </Text>
-            <TouchableOpacity
-              style={styles.confirmButton}
-              onPress={async () => {
-                if (!pecaToDelete) return;
-                try {
-                  await excluirPeca(pecaToDelete.id);
-                  setPecas((prev) => ({
-                    ...prev,
-                    [pecaToDelete.categoria]: prev[
-                      pecaToDelete.categoria
-                    ].filter((peca) => peca.id !== pecaToDelete.id),
-                  }));
-                  Alert.alert("Sucesso", "Peça removida!");
-                } catch (error) {
-                  console.error("Erro ao excluir:", error);
-                  Alert.alert("Erro", "Não foi possível excluir.");
-                } finally {
-                  setShowConfirmModal(false);
+            <View style={styles.confirmButtonsRow}>
+              <TouchableOpacity
+                style={[styles.confirmButton, styles.confirmButtonSim]}
+                onPress={async () => {
+                  if (!pecaToDelete) return;
+                  try {
+                    await excluirPeca(pecaToDelete.id);
+                    setPecas((prev) => ({
+                      ...prev,
+                      [pecaToDelete.categoria]: prev[pecaToDelete.categoria].filter(
+                        (peca) => peca.id !== pecaToDelete.id
+                      ),
+                    }));
+                    setModalMensagem({
+                      visible: true,
+                      title: "Sucesso",
+                      mensagem: "Peça removida!",
+                    });
+                  } catch (error) {
+                    console.error("Erro ao excluir:", error);
+                    setModalMensagem({
+                      visible: true,
+                      title: "Erro",
+                      mensagem: "Não foi possível excluir.",
+                    });
+                  } finally {
+                    setModalConfirmExclusao(false);
+                    setPecaToDelete(null);
+                  }
+                }}
+              >
+                <Text style={styles.confirmButtonTextSim}>Sim</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.confirmButton, styles.confirmButtonNao]}
+                onPress={() => {
+                  setModalConfirmExclusao(false);
                   setPecaToDelete(null);
-                }
-              }}
-            >
-              <Text style={styles.confirmButtonText}>Sim</Text>
-            </TouchableOpacity>
+                }}
+              >
+                <Text style={styles.confirmButtonTextNao}>Não</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modal: Mensagem Genérica */}
+      <Modal
+        visible={modalMensagem.visible}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() =>
+          setModalMensagem({ visible: false, title: "", mensagem: "" })
+        }
+      >
+        <View style={styles.overlayCentral}>
+          <View style={styles.messageModalBox}>
+            <Text style={styles.messageModalTitle}>{modalMensagem.title}</Text>
+            {modalMensagem.mensagem ? (
+              <Text style={styles.messageModalText}>{modalMensagem.mensagem}</Text>
+            ) : null}
             <TouchableOpacity
-              style={styles.confirmButton}
-              onPress={() => {
-                setShowConfirmModal(false);
-                setPecaToDelete(null);
-              }}
+              style={styles.okButton}
+              onPress={() =>
+                setModalMensagem({ visible: false, title: "", mensagem: "" })
+              }
             >
-              <Text style={styles.confirmButtonText}>Não</Text>
+              <Text style={styles.okButtonText}>OK</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1461,7 +1500,6 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     color: "#000",
   },
-  // --- Cabeçalho do clima ---
   climaHeader: {
     marginBottom: 20,
     alignItems: "center",
@@ -1472,7 +1510,6 @@ const styles = StyleSheet.create({
     color: "#000",
     textAlign: "center",
   },
-  // --- Navegação por setas ---
   lookNavigatorContainer: {
     flexDirection: "row",
     alignItems: "center",
@@ -1486,14 +1523,13 @@ const styles = StyleSheet.create({
     height: 80,
     justifyContent: "center",
     alignItems: "center",
-    marginlef: -10,
+    marginHorizontal: -10,
   },
   setaTexto: {
     fontSize: 70,
     fontWeight: "bold",
     color: "#000",
   },
-  // --- Look card ---
   lookCard: {
     width: 220,
     height: 480,
@@ -1534,7 +1570,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: "#777",
   },
-  // --- Botão de salvar como ícone ---
   botaoSalvarLook: {
     position: "absolute",
     bottom: -25,
@@ -1555,7 +1590,6 @@ const styles = StyleSheet.create({
     width: 28,
     height: 28,
   },
-  // --- Indicador de página (bolinhas) ---
   indicadorContainer: {
     flexDirection: "row",
     justifyContent: "center",
@@ -1567,5 +1601,85 @@ const styles = StyleSheet.create({
     height: 10,
     borderRadius: 5,
     backgroundColor: "#ccc",
+  },
+
+  // --- Modal de Confirmação ---
+  confirmModalBox: {
+    width: "80%",
+    maxWidth: 350,
+    backgroundColor: "#A89CF2",
+    borderRadius: 20,
+    padding: 24,
+    alignItems: "center",
+  },
+  confirmModalTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#000",
+    textAlign: "center",
+    marginBottom: 24,
+  },
+  confirmButtonsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    width: "100%",
+  },
+  confirmButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    marginHorizontal: 6,
+    alignItems: "center",
+  },
+  confirmButtonSim: {
+    backgroundColor: "#fff",
+  },
+  confirmButtonTextSim: {
+    color: "#000",
+    fontWeight: "bold",
+    fontSize: 16,
+  },
+  confirmButtonNao: {
+    backgroundColor: "#000",
+  },
+  confirmButtonTextNao: {
+    color: "#fff",
+    fontWeight: "bold",
+    fontSize: 16,
+  },
+
+  // --- Modal de Mensagem Genérica ---
+  messageModalBox: {
+    width: "80%",
+    maxWidth: 350,
+    backgroundColor: "#A89CF2",
+    borderRadius: 20,
+    padding: 24,
+    alignItems: "center",
+  },
+  messageModalTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#000",
+    textAlign: "center",
+    marginBottom: 12,
+  },
+  messageModalText: {
+    fontSize: 15,
+    color: "#000",
+    textAlign: "center",
+    marginBottom: 24,
+    lineHeight: 20,
+  },
+  okButton: {
+    backgroundColor: "#fff",
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 12,
+  },
+  okButtonText: {
+    color: "#000",
+    fontWeight: "bold",
+    fontSize: 16,
   },
 });

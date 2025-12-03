@@ -61,7 +61,7 @@ export default function Login() {
 
      
       <View style={styles.logoContainer}>
-        <Image source={require('../assets/logo.png')} style={styles.logoImage} />
+        <Image source={require('../assets/logob.png')} style={styles.logoImage} />
       </View>
 
      
